@@ -3,55 +3,37 @@ pub enum AddressingMode {
     Immediate,
     Direct,
     Relative,
+    IndexX,
     NoneAddressing,
 }
 
 pub mod flags {
-    /* 68HC11 status flags:       */
-    pub const C_FLAG: u8 = 0x01; /* 1: Carry occured           */
-    pub const V_FLAG: u8 = 0x02; /* 1: Overflow occured        */
-    pub const Z_FLAG: u8 = 0x04; /* 1: Result is zero          */
-    pub const N_FLAG: u8 = 0x08; /* 1: Result is negative      */
-    pub const I_FLAG: u8 = 0x10; /* I interrupt mask           */
+    /*                 68HC11 status flags:                 */
+    pub const C_FLAG: u8 = 0x01; /* Carry occured           */
+    pub const V_FLAG: u8 = 0x02; /* Overflow occured        */
+    pub const Z_FLAG: u8 = 0x04; /* Result is zero          */
+    pub const N_FLAG: u8 = 0x08; /* Result is negative      */
+    pub const I_FLAG: u8 = 0x10; /* I interrupt mask        */
     pub const H_FLAG: u8 = 0x20; /* Half-carry occured (from bit 3) */
-    pub const X_FLAG: u8 = 0x40; /* X interrupt mask           */
-    pub const S_FLAG: u8 = 0x80; /* Stop disable flag          */
+    pub const X_FLAG: u8 = 0x40; /* X interrupt mask        */
+    pub const S_FLAG: u8 = 0x80; /* Stop disable flag       */
 }
-
-// pub struct OpCode {
-//     code: u8,
-//     mnemonic: &'static str,
-//     bytes: u8,
-//     cycles: u8,
-//     mode: AddressingMode,
-
-// }
-// impl OpCode {
-//     fn new(code:u8, mnemonic: &'static str, bytes:u8, cycles:u8, mode: AddressingMode) -> Self {
-//         OpCode {
-//             code: code,
-//             mnemonic: mnemonic,
-//             bytes: bytes,
-//             cycles: cycles,
-//             mode: mode,
-//         }
-//     }
-// }
+use crate::flags::*;
 
 pub struct CPU {
     pub register_a: u8,
+    pub index_x: u16,
     pub status: u8,
     pub program_counter: u16,
     memory: [u8; 0xFFFF],
 }
 
-
-use flags::*;
 impl CPU {
     pub fn new() -> Self {
         CPU {
             register_a: 0,
             status: 0,
+            index_x: 0,
             program_counter: 0,
             memory: [0; 0xFFFF],
         }
@@ -61,7 +43,13 @@ impl CPU {
         self.memory[addr as usize]
     }
 
-    fn mem_write(&mut self, addr: u16, data: u8) {
+    fn mem_read_u16(&self, addr: u16) -> u16 {
+        let hi = self.mem_read(addr) as u16;
+        let lo = self.mem_read(addr + 1) as u16;
+        (hi << 8) | lo
+    }
+
+    pub fn mem_write(&mut self, addr: u16, data: u8) {
         self.memory[addr as usize] = data;
     }
 
@@ -82,11 +70,16 @@ impl CPU {
         self.program_counter = 0xE000;
     }
 
-    fn get_operand_address(&self, mode: &AddressingMode) -> u16 {
+    fn get_operand_address(&mut self, mode: &AddressingMode) -> u16 {
         match mode {
             AddressingMode::Immediate => self.program_counter,
             AddressingMode::Direct => self.mem_read(self.program_counter) as u16,
             AddressingMode::Relative => self.program_counter.wrapping_add(self.mem_read(self.program_counter) as u16) as u16,
+            AddressingMode::IndexX => {
+                let offset = self.mem_read_u16(self.program_counter);
+                self.program_counter += 1;
+                self.index_x.wrapping_add(offset)
+            }
             AddressingMode::NoneAddressing => {
                 panic!("mode {:?} is not supported", mode);
             }
@@ -104,7 +97,22 @@ impl CPU {
 
     fn add(&mut self, mode: &AddressingMode) {
         let addr = self.get_operand_address(mode);
-        let result = self.register_a.wrapping_add(self.mem_read(addr));
+        let operand2 = self.mem_read(addr);
+        let sum = self.register_a as u16 + operand2 as u16;
+        // Check for carry occured
+        if sum > 0xFF {
+            self.status |= C_FLAG;
+        } else {
+            self.status &= !C_FLAG;
+        }
+
+        let result = sum as u8;
+        // Clear or set overflow flag if needed
+        if (operand2 ^ result) & (self.register_a ^ result) >> 7 != 0{
+            self.status |= V_FLAG;
+        } else {
+            self.status &= ! V_FLAG;
+        }
         self.register_a = result;
         self.update_zero_and_negative_flags(result);
     }
@@ -126,7 +134,6 @@ impl CPU {
             self.status &= !N_FLAG;
         }
     }
-
     pub fn run(&mut self) {
         loop {
             // FETCH
@@ -164,58 +171,3 @@ impl CPU {
     }
 }
 
-
-#[cfg(test)]
-mod opcode_tests {
-    use super::flags::*;
-    use super::CPU;
-    #[test]
-    fn test_lda_imm_load_data() {
-        let mut cpu = CPU::new();
-        cpu.load_and_run(vec![0x86, 0x05, 0x3E]);
-
-        assert_eq!(cpu.register_a, 5);
-        assert!(cpu.status & Z_FLAG == 0);
-        assert!(cpu.status & N_FLAG == 0);
-    }
-    #[test]
-    fn test_lda_direct_mode() {
-        let mut cpu = CPU::new();
-        cpu.mem_write(0x20, 0x0A);
-        cpu.load_and_run(vec![0x96, 0x20, 0x3E]);
-
-        assert_eq!(cpu.register_a, 10);
-        assert!(cpu.status & Z_FLAG == 0);
-        assert!(cpu.status & N_FLAG == 0);
-    }
-
-    #[test]
-    fn test_lda_imm_zero_flag() {
-        let mut cpu = CPU::new();
-        cpu.load_and_run(vec![0x86, 0x00, 0x3E]);
-        assert!(cpu.status & Z_FLAG == Z_FLAG);
-    }
-
-    #[test]
-    fn test_add_positive() {
-        let mut cpu = CPU::new();
-        cpu.load_and_run(vec![0x8B, 0x18, 0x3E]);
-        assert_eq!(cpu.register_a, 24);
-    }
-
-    #[test]
-    fn test_add_negative() {
-        let mut cpu = CPU::new();
-        cpu.load_and_run(vec![0x86, 0x0C, 0x8B, 0xE8, 0x3E]);
-        assert_eq!(cpu.register_a, 0xF4);
-        assert!(cpu.status & N_FLAG == N_FLAG);
-    }
-
-    #[test]
-    fn test_add_to_zero() {
-        let mut cpu = CPU::new();
-        cpu.load_and_run(vec![0x86, 0x08, 0x8B, 0xF8, 0x3E]);
-        assert_eq!(cpu.register_a, 0x00);
-        assert!(cpu.status & Z_FLAG == Z_FLAG);
-    }
-}
