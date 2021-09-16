@@ -9,14 +9,15 @@ pub enum AddressingMode {
 
 pub mod flags {
     /*                 68HC11 status flags:                 */
-    pub const C_FLAG: u8 = 0x01; /* Carry occured           */
-    pub const V_FLAG: u8 = 0x02; /* Overflow occured        */
-    pub const Z_FLAG: u8 = 0x04; /* Result is zero          */
-    pub const N_FLAG: u8 = 0x08; /* Result is negative      */
-    pub const I_FLAG: u8 = 0x10; /* I interrupt mask        */
-    pub const H_FLAG: u8 = 0x20; /* Half-carry occured (from bit 3) */
-    pub const X_FLAG: u8 = 0x40; /* X interrupt mask        */
-    pub const S_FLAG: u8 = 0x80; /* Stop disable flag       */
+    pub const NO_FLAG: u8 = 0x00; /* No flags set           */
+    pub const C_FLAG:  u8 = 0x01; /* Carry occured           */
+    pub const V_FLAG:  u8 = 0x02; /* Overflow occured        */
+    pub const Z_FLAG:  u8 = 0x04; /* Result is zero          */
+    pub const N_FLAG:  u8 = 0x08; /* Result is negative      */
+    pub const I_FLAG:  u8 = 0x10; /* I interrupt mask        */
+    pub const H_FLAG:  u8 = 0x20; /* Half-carry occured (from bit 3) */
+    pub const X_FLAG:  u8 = 0x40; /* X interrupt mask        */
+    pub const S_FLAG:  u8 = 0x80; /* Stop disable flag       */
 }
 use crate::flags::*;
 
@@ -74,7 +75,10 @@ impl CPU {
         match mode {
             AddressingMode::Immediate => self.program_counter,
             AddressingMode::Direct => self.mem_read(self.program_counter) as u16,
-            AddressingMode::Relative => self.program_counter.wrapping_add(self.mem_read(self.program_counter) as u16) as u16,
+            AddressingMode::Relative => {
+                self.program_counter
+                    .wrapping_add(self.mem_read(self.program_counter) as u16) as u16
+            }
             AddressingMode::IndexX => {
                 let offset = self.mem_read_u16(self.program_counter);
                 self.program_counter += 1;
@@ -98,23 +102,36 @@ impl CPU {
     fn add(&mut self, mode: &AddressingMode) {
         let addr = self.get_operand_address(mode);
         let operand2 = self.mem_read(addr);
-        let sum = self.register_a as u16 + operand2 as u16;
+        // let sum = self.register_a as u16 + operand2 as u16;
+        let result = self.register_a.wrapping_add(operand2);
+
         // Check for carry occured
-        if sum > 0xFF {
-            self.status |= C_FLAG;
-        } else {
+        // X7 & M7 + M7 & !R7 | X7 & !R7
+        // Manual p. 496
+        if ((self.register_a & operand2) | (operand2 & !result) | (!result & self.register_a)) & 0x80
+            == 0
+        {
+            // Clear
             self.status &= !C_FLAG;
+        } else {
+            // Set
+            self.status |= C_FLAG;
         }
 
-        let result = sum as u8;
         // Clear or set overflow flag if needed
-        if (operand2 ^ result) & (self.register_a ^ result) >> 7 != 0{
-            self.status |= V_FLAG;
+        // X7 & M7 & !R7 | !X7 & !M7 & R7
+        // Manual p. 496
+        if ((operand2 & self.register_a & !result) | (!operand2 & !self.register_a & result)) & 0x80
+            == 0
+        {
+            // Clear
+            self.status &= !V_FLAG;
         } else {
-            self.status &= ! V_FLAG;
+            // Set
+            self.status |= V_FLAG;
         }
-        self.register_a = result;
         self.update_zero_and_negative_flags(result);
+        self.register_a = result;
     }
 
     fn update_zero_and_negative_flags(&mut self, result: u8) {
@@ -126,12 +143,12 @@ impl CPU {
             self.status &= !Z_FLAG;
         }
 
-        if result >> 7 == 1 {
-            // Result is negative, set N flag
-            self.status |= N_FLAG;
-        } else {
+        if result & 0x80 == 0 {
             // Result is positive, clear N flag
             self.status &= !N_FLAG;
+        } else {
+            // Result is negative, set N flag
+            self.status |= N_FLAG;
         }
     }
     pub fn run(&mut self) {
@@ -170,4 +187,3 @@ impl CPU {
         }
     }
 }
-
